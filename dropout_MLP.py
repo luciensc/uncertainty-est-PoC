@@ -7,6 +7,8 @@ from torch.utils.data import TensorDataset, DataLoader
 import pandas as pd
 import numpy as np
 
+from data_utils import *
+
 from data_utils import SineData
 class SimpleMLPClassifier:
     def __init__(self, 
@@ -200,13 +202,228 @@ class SimpleMLPClassifier:
         return self.label_encoder.inverse_transform(pred_indices)
 
 
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+from torch.utils.data import TensorDataset, DataLoader
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+class SimpleMLPRegressor:
+    def __init__(self,
+                 hidden_layers=(128, 16),
+                 batch_size=64,
+                 learning_rate=1e-3,
+                 max_epochs=100,
+                 validation_split=0.1,
+                 shuffle=True,
+                 random_state=42,
+                 dropout_rate=0.4,
+                 l2_reg=0.01,
+                 verbose=True):
+        """
+        A simple MLP regressor with dropout, L2 regularization, and MSE loss.
+        """
+        self.hidden_layers = hidden_layers
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self.max_epochs = max_epochs
+        self.validation_split = validation_split
+        self.shuffle = shuffle
+        self.random_state = random_state
+        self.dropout_rate = dropout_rate
+        self.l2_reg = l2_reg
+        self.verbose = verbose
+        
+        self.model = None
+
+        # We will store the train and val losses for plotting later
+        self.train_losses = []
+        self.val_losses = []
+
+        if random_state is not None:
+            torch.manual_seed(random_state)
+    
+    def _build_network(self, input_size):
+        """
+        Build a feed-forward MLP with dropout.
+        The output layer has a single neuron for regression.
+        """
+        layers = []
+        in_features = input_size
+        
+        for i, hidden_size in enumerate(self.hidden_layers):
+            layers.append(nn.Linear(in_features, hidden_size))
+            layers.append(nn.ReLU())
+            if self.dropout_rate > 0: #and i < len(self.hidden_layers) - 1:
+                layers.append(nn.Dropout(self.dropout_rate))
+            in_features = hidden_size
+        
+        # Output layer for regression: 1 neuron
+        layers.append(nn.Linear(in_features, 1))
+        
+        self.model = nn.Sequential(*layers)
+    
+    def fit(self, X, y):
+        """
+        Fit the model to the training data (regression).
+        X, y can be NumPy arrays or Pandas objects. We'll convert them to tensors.
+        """
+        # Convert to DataFrame/Series if not already
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X)
+        if isinstance(y, np.ndarray):
+            y = pd.Series(y)
+        
+        # Split into train/validation if needed
+        if self.validation_split > 0:
+            X_train, X_val, y_train, y_val = train_test_split(
+                X, y, test_size=self.validation_split,
+                shuffle=self.shuffle,
+                random_state=self.random_state
+            )
+            X_val_tensor = torch.tensor(X_val.to_numpy(), dtype=torch.float32)
+            y_val_tensor = torch.tensor(y_val.to_numpy(), dtype=torch.float32).view(-1, 1)
+        else:
+            X_train = X
+            y_train = y
+            X_val_tensor = None
+            y_val_tensor = None
+        
+        X_train_tensor = torch.tensor(X_train.to_numpy(), dtype=torch.float32)
+        y_train_tensor = torch.tensor(y_train.to_numpy(), dtype=torch.float32).view(-1, 1)
+        
+        input_size = X_train_tensor.shape[1]
+        self._build_network(input_size)
+        
+        train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
+        
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(self.model.parameters(),
+                               lr=self.learning_rate,
+                               weight_decay=self.l2_reg)
+        for epoch in range(self.max_epochs):
+            total_loss = 0.0
+            total_samples = 0  # Track total number of samples processed
+            self.model.train()  # Enable dropout
+
+            for batch_X, batch_y in train_loader:
+                optimizer.zero_grad()
+                outputs = self.model(batch_X)
+                loss = criterion(outputs, batch_y)
+
+                # Accumulate loss scaled by batch size
+                total_loss += loss.item() * batch_X.size(0)
+                total_samples += batch_X.size(0)
+
+                loss.backward()
+                optimizer.step()
+
+            # Compute the true average training loss for the epoch
+            avg_loss = total_loss / total_samples
+            self.train_losses.append(avg_loss)  # Store the average training loss
+
+            # If using validation, evaluate
+            if self.validation_split > 0 and X_val_tensor is not None:
+                val_loss = self._validate_model(X_val_tensor, y_val_tensor)
+                self.val_losses.append(val_loss)
+                if self.verbose:
+                    print(f"Epoch [{epoch+1}/{self.max_epochs}], "
+                          f"Train Loss: {avg_loss:.4f}, Val Loss: {val_loss:.4f}")
+            else:
+                # if no val split, store a dummy None or repeat train loss if you want
+                self.val_losses.append(None)
+                if self.verbose:
+                    print(f"Epoch [{epoch+1}/{self.max_epochs}], Loss: {avg_loss:.4f}")
+        
+        return self
+    
+    def _validate_model(self, X_val_tensor, y_val_tensor):
+        """
+        Evaluate the model on the validation set (MSE).
+        """
+        self.model.eval()
+        criterion = nn.MSELoss()
+        
+        with torch.no_grad():
+            outputs = self.model(X_val_tensor)
+            val_loss = criterion(outputs, y_val_tensor).item()
+        return val_loss
+    
+    def predict(self, X):
+        """
+        Single forward pass in eval mode (no dropout).
+        Returns a NumPy array of shape (N,).
+        """
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X)
+        X_tensor = torch.tensor(X.to_numpy(), dtype=torch.float32)
+        
+        self.model.eval()
+        with torch.no_grad():
+            outputs = self.model(X_tensor).cpu().numpy().flatten()
+        return outputs
+    
+    def predict_mc(self, X, T=10):
+        """
+        Perform T forward passes with dropout *enabled*, 
+        returning the stacked predictions for each pass.
+        Shape of the returned array: (T, N).
+        """
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X)
+        X_tensor = torch.tensor(X.to_numpy(), dtype=torch.float32)
+        
+        self.model.train()  # Enable dropout
+        all_preds = []
+        
+        for _ in range(T):
+            with torch.no_grad():
+                preds = self.model(X_tensor).cpu().numpy().flatten()
+                all_preds.append(preds)
+        
+        return np.stack(all_preds, axis=0)  # Shape: (T, N)
+    
+    def predict_with_mc(self, X, T=10):
+        """
+        Predict using the average over T MC-dropout forward passes.
+        Returns an array of shape (N,) with the mean prediction.
+        """
+        mc_preds = self.predict_mc(X, T=T)   # Shape: (T, N)
+        mean_preds = mc_preds.mean(axis=0)   # Shape: (N,)
+        return mean_preds
+
+    def plot_losses(self):
+        """
+        Plot the training (and, if available, validation) loss over epochs.
+        """
+        plt.figure(figsize=(8, 5))
+        plt.plot(self.train_losses, label='Train Loss')
+        
+        # Only plot val losses if they are not None (i.e., if val_split > 0)
+        # If you used self.val_losses.append(None) for no-val epochs, skip them
+        val_loss_array = [v for v in self.val_losses if v is not None]
+        if len(val_loss_array) == len(self.val_losses):  # means we have real val losses
+            plt.plot(self.val_losses, label='Validation Loss')
+        
+        plt.xlabel("Epoch")
+        plt.ylabel("MSE Loss")
+        plt.title("Training and Validation Loss Over Epochs")
+        plt.legend()
+        plt.show()
+
+
+
 if __name__ == '__main__':
     from sklearn.datasets import load_digits
     from sklearn.preprocessing import StandardScaler
     from sklearn.model_selection import train_test_split
     import pandas as pd
 
-    CLASSIFICATION = True
+    CLASSIFICATION = False
     
     if CLASSIFICATION:
         # Load digits dataset
@@ -260,20 +477,48 @@ if __name__ == '__main__':
         print("Mean sample variance:", mean_sample_variance)
 
     else: # regression
-        sine_data = SineData()
-        X, y = sine_data.get_data_epistemic_gap(L=10, gap_width=2, n_samples=1000)
-        sine_data.visualise_data(X, y)
+        sine_data = SineData(random_state=42)
+        L = 30
+        X_train, y_train = sine_data.get_data_epistemic_gap(L=L, gap_width=8, n_samples=500)
 
-        # split
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.5, random_state=42)
+        # scale data
+        scaler = StandardScaler()
+        X_train = X_train.reshape(-1, 1)
+        X_train = scaler.fit_transform(X_train)
+        # visualise data
+        # sine_data.visualise_data(X_train, y_train)
 
         # create model
-        model = SimpleMLPRegressor(hidden_layers=(64, 8), dropout_rate=0.5, l2_reg=0.001, max_epochs=20, validation_split=0.2, random_state=42, verbose=True)
+        model = SimpleMLPRegressor(
+            learning_rate=3e-4,
+            hidden_layers=(1024, 1024, 1024, 1024),
+            dropout_rate=0.2,
+            l2_reg=0.000,
+            max_epochs=300,
+            validation_split=0.3,
+            random_state=42,
+            verbose=True, 
+            batch_size=100
+        )
         model.fit(X_train, y_train)
 
-        # predict across multiple MC passes
-        T = 10
-        mc_preds = model.predict_with_mc(X_test, T=T)
+        # Plot train/val loss curves
+        model.plot_losses()
 
-        # visualise: true distribution with overlay of model predictions across all passes
-        # TODO: implement
+        # generate test data: sinus data over linspace of full X range
+        X_test = np.linspace(0, L, 500)
+        y_test = np.sin(X_test)
+        X_test = X_test.reshape(-1, 1)
+        X_test = scaler.transform(X_test)
+
+        # predict across multiple MC passes
+        T = 200
+        mc_preds = model.predict_mc(X_test, T=T)  # shape [T, N]
+        # visualize multiple passes
+        visualise_multiple_passes(
+            X_test=X_test, 
+            y_test=y_test, 
+            mc_preds=mc_preds,
+            X_train=X_train, 
+            bins=50
+        )

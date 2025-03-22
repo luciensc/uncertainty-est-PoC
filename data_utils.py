@@ -105,10 +105,10 @@ class SineData():
         """
         assert gap_width < L, "Gap width must be less than the length of the data"
         # range 1
-        X_1, y_1 = self.generate_data_pure(0, L, n_samples//2)
+        X_1, y_1 = self.generate_data_pure(0, L//2, n_samples//2)
 
         # range 2
-        X_2, y_2 = self.generate_data_pure(L+gap_width, 2*L, n_samples//2)
+        X_2, y_2 = self.generate_data_pure(L//2+gap_width, L, n_samples//2)
 
         # combine
         X = np.concatenate([X_1, X_2])
@@ -138,6 +138,107 @@ class SineData():
     def visualise_data(self, X, y):
         plt.scatter(X, y, marker='o')
         plt.show()
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+def visualise_multiple_passes(
+    X_test, 
+    y_test, 
+    mc_preds,
+    X_train=None, 
+    bins=30
+):
+    """
+    Plot:
+      1) Top subplot: ground truth + T forward-pass predictions (all scatter)
+      2) Middle subplot: standard deviation of T passes at each X (scatter)
+      3) Optional bottom subplot: histogram of training X data distribution
+    
+    Args:
+        X_test (array-like): shape (N,) or (N,1). The test input features.
+        y_test (array-like): shape (N,). The true test target values.
+        mc_preds (np.ndarray): shape (T, N). Predictions across T forward passes.
+        X_train (array-like, optional): shape (M,) or (M,1). Training input features 
+            for plotting a density/histogram. If None, we skip this subplot.
+        bins (int): number of bins in the training data histogram.
+    """
+    # Convert test inputs to NumPy arrays and flatten if needed
+    X_test = np.array(X_test).flatten()
+    y_test = np.array(y_test).flatten()
+    
+    # Decide how many subplots
+    # - 2 subplots if no training data is provided
+    # - 3 subplots if training data is provided
+    if X_train is not None:
+        nrows = 3
+    else:
+        nrows = 2
+    
+    # Adjust figure size accordingly
+    fig, axs = plt.subplots(nrows, 1, figsize=(8, 4 * nrows), sharex=True)
+    if nrows == 2:
+        ax_top, ax_mid = axs
+        ax_bottom = None
+    else:
+        ax_top, ax_mid, ax_bottom = axs
+
+    # Sort by X for a nicer left-to-right scatter (for test data)
+    sorted_indices = np.argsort(X_test)
+    X_sorted = X_test[sorted_indices]
+    y_sorted = y_test[sorted_indices]
+
+    # mc_preds should be shape (T, N). 
+    # Sort each row by the same indices:
+    mc_preds_sorted = mc_preds[:, sorted_indices]  # shape: (T, N)
+
+    # -- Top Subplot: ground truth + T forward passes (scatter) --
+    ax_top.scatter(X_sorted, y_sorted, color='red', s=10, label='Ground Truth')
+    
+    T = mc_preds.shape[0]
+    for t in range(T):
+        ax_top.scatter(
+            X_sorted,
+            mc_preds_sorted[t],
+            color='blue',
+            alpha=0.3,
+            s=10,
+            label='Predictions (MC pass)' if t == 0 else None
+        )
+    ax_top.set_ylabel('Value / Predictions')
+    ax_top.set_title("MC Dropout Predictions vs Ground Truth")
+    ax_top.legend()
+
+    # -- Middle Subplot: standard deviation as scatter --
+    # Compute std across T dimension -> shape [N]
+    stds = mc_preds_sorted.std(axis=0)
+    # max_min_diff = mc_preds_sorted.max(axis=0) - mc_preds_sorted.min(axis=0)
+    ax_mid.scatter(X_sorted, stds, color='black', s=10, alpha=0.8, label='Std of MC predictions')
+    ax_mid.set_ylabel('Standard Deviation')
+    ax_mid.legend()
+
+    # -- Optional Bottom Subplot: training data histogram (X_train) --
+    if X_train is not None:
+        # Convert and flatten training X if necessary
+        X_train_flat = np.array(X_train).flatten()
+        ax_bottom.hist(X_train_flat, bins=bins, color='gray', alpha=0.7)
+        ax_bottom.set_xlabel('X')
+        ax_bottom.set_ylabel('Count')
+        ax_bottom.set_title('Training Data Distribution (X)')
+
+        # We share the X-axis. If your X_test is outside your training range, 
+        # the histogram might be squished. You can set the x-limits if you like:
+        # ax_bottom.set_xlim([X_sorted.min(), X_sorted.max()])
+    else:
+        # If no training data is provided, label the bottom axis in the middle subplot
+        ax_mid.set_xlabel('X')
+
+    plt.tight_layout()
+    plt.show()
+
+
+
+
 
 if __name__ == "__main__":
     # noisy_numbers = NoisyNumbers()
